@@ -1,0 +1,314 @@
+import Data.List
+import Data.Char
+import System.IO
+import Control.Monad
+import System.Process
+
+data BasicType = Basic String deriving Eq
+
+data Type = BT BasicType | Slash Type Type | BackSlash Type Type | Bullet Type Type | DownArrow Int Type Type | UpArrow Int Type Type | ODot Int Type Type | I | J deriving Eq
+
+instance Show BasicType where
+	show (Basic c) = show c
+
+instance Show Type where
+	show (BT (Basic c)) 		= show c
+	show (Slash t1 t2) 			= "(" ++ show t1 ++ " / " ++ show t2 ++ ")"
+	show (BackSlash t1 t2) 		= "(" ++ show t1 ++ " \\ " ++ show t2 ++ ")"
+	show (Bullet t1 t2) 		= "(" ++ show t1 ++ " * " ++ show t2 ++ ")"
+	show (DownArrow n t1 t2) 	= "(" ++ show t1 ++ " v_" ++ show n ++ " " ++ show t2 ++ ")"
+	show (UpArrow n t1 t2) 		= "(" ++ show t1 ++ " ^_" ++ show n ++ " " ++ show t2 ++ ")"
+	show (ODot n t1 t2)			= "(" ++ show t1 ++ " o_" ++ show n ++ " " ++ show t2 ++ ")"
+	show I						= "I"
+	show J						= "J"
+
+sortT :: [(BasicType,Int)] -> Type -> Maybe Int
+sortT basicTypes (BT t) = lookup t basicTypes
+sortT basicTypes (Slash t1 t2) 		= let s = (sortT basicTypes t1) `minus` (sortT basicTypes t2)
+										  in if s `lessThan` 0 then Nothing else s
+sortT basicTypes (BackSlash t1 t2) 	= let s = (sortT basicTypes t2) `minus` (sortT basicTypes t1)
+										  in if s `lessThan` 0 then Nothing else s
+sortT basicTypes (Bullet t1 t2) 		= (sortT basicTypes t1) `plus` (sortT basicTypes t2)
+sortT basicTypes (DownArrow n t1 t2) = let s = ((sortT basicTypes t2) `minus` (sortT basicTypes t1)) `plus` (Just 1)
+										  in if s `lessThan` 0 then Nothing else s
+sortT basicTypes (UpArrow n t1 t2)	= let s = ((sortT basicTypes t1) `minus` (sortT basicTypes t2)) `plus` (Just 1)
+										  in if s `lessThan` 0 then Nothing else s
+sortT basicTypes (ODot n t1 t2)		= let r = sortT basicTypes t1 
+									  in let s = (r `plus` (sortT basicTypes t2)) `minus` (Just 1)
+										  in if r `lessThan` 1 || s `lessThan` 0 then Nothing else s
+sortT basicTypes I					= Just 0
+sortT basicTypes J					= Just 1
+
+sortTUnsafe :: [(BasicType,Int)] -> Type -> Int
+sortTUnsafe basicTypes t = let Just n = sortT basicTypes t in n
+
+plus :: Maybe Int -> Maybe Int -> Maybe Int
+plus = liftM2 (+)
+
+minus :: Maybe Int -> Maybe Int -> Maybe Int
+minus = liftM2 (-)
+
+lessThan :: Maybe Int -> Int -> Bool
+lessThan (Just n) m = n < m
+lessThan Nothing _  = True
+
+type LexEntry = (String,Type)
+type Grammar = ([(BasicType,Int)],[LexEntry],Type)
+
+-- EXAMPLES
+
+t1 :: Type
+t1 = BackSlash J (BackSlash (BT (Basic "A")) (BackSlash J (BackSlash (BT (Basic "A")) (Slash (BT (Basic "P")) J))))
+
+
+basicTypes :: [(BasicType,Int)]
+basicTypes = [(Basic "A",0),(Basic "B",0),(Basic "P",2),(Basic "Q",2),(Basic "R",2)]
+
+basicTypes2 :: [(BasicType,Int)]
+basicTypes2 = [(Basic "A",0),(Basic "B",1),(Basic "P",2)]
+
+grammar1 :: Grammar
+grammar1 = (basicTypes,
+			[("a",(BT (Basic "A"))),
+			 ("a",(BackSlash J (BackSlash (BT (Basic "A")) (BackSlash J (BackSlash (BT (Basic "A")) (BT (Basic "P"))))))),
+			 ("a",(BackSlash J (DownArrow 2 (BT (Basic "P")) (BT (Basic "Q"))))),
+			 ("a",(BackSlash J (DownArrow 1 (BT (Basic "Q")) (BackSlash (BT (Basic "A")) (BT (Basic "P")))))),
+			 ("b",(BT (Basic "B"))),
+			 ("b",(BackSlash J (BackSlash (BT (Basic "B")) (BackSlash J (BackSlash (BT (Basic "B")) (BT (Basic "P"))))))),	
+			 ("b",(BackSlash J (DownArrow 2 (BT (Basic "P")) (BT (Basic "R"))))),
+			 ("b",(BackSlash J (DownArrow 1 (BT (Basic "R")) (BackSlash (BT (Basic "B")) (BT (Basic "P"))))))
+			]
+			,(ODot 1 (ODot 2 (BT (Basic "P")) I) I))
+			
+grammar2 :: Grammar
+grammar2 = (basicTypes2,
+			[("a",(BT (Basic "A"))),
+			 ("b",(BackSlash J (BT (Basic "B")))),
+			 ("c",(BackSlash J (BackSlash (BT (Basic "B")) (BT (Basic "P")))))	
+			 ],
+				(ODot 1 (ODot 2 (BT (Basic "P")) I) I))
+			
+-- checking whether the sorts in a grammar are correct		
+isGoodGrammar :: Grammar -> Bool
+isGoodGrammar (basicTypes,lex,start) = (not $ any (\x -> x == Nothing) (map (\(x,y) -> sortT basicTypes y) lex))
+										&& 
+										(not $ (sortT basicTypes start) == Nothing)
+
+-- the head of a type
+headT :: Type -> Type
+headT (BT (Basic c)) 		= BT (Basic c)
+headT (Slash t1 t2) 		= headT t1
+headT (BackSlash t1 t2) 	= headT t2
+headT (Bullet t1 t2) 		= Bullet t1 t2
+headT (DownArrow n t1 t2) 	= headT t2
+headT (UpArrow n t1 t2) 	= headT t1
+headT (ODot n t1 t2)		= headT t1
+headT I						= I
+headT J						= J
+
+-- the number of J's inserted on the left
+leftDegree :: [(BasicType,Int)] -> Type -> Int
+leftDegree basicT (Slash t1 t2)					= leftDegree basicT t1
+leftDegree basicT (BackSlash J t2)				= 1 + leftDegree basicT t2
+leftDegree basicT (BackSlash (BT (Basic c)) t2) = sortTUnsafe basicT (BT (Basic c)) + leftDegree basicT t2
+leftDegree basicT (DownArrow n t1 t2) 			= (n-1) + leftDegree basicT t2
+leftDegree _ _ 									= 0
+
+-- the number of J's inserted on the right
+rightDegree :: [(BasicType,Int)] -> Type -> Int
+rightDegree basicT (Slash t1 J)					= 1 + rightDegree basicT t1
+rightDegree basicT (Slash t1 (BT (Basic c)))	=  rightDegree basicT t1 + sortTUnsafe basicT (BT (Basic c))
+rightDegree basicT (BackSlash t1 t2) 			= rightDegree basicT t2
+rightDegree basicT (DownArrow n t1 t2) 			= (sortTUnsafe basicT t1-n) + rightDegree basicT t2
+rightDegree _ _									= 0
+ 
+-- converting a type given a list of variables
+convertType :: [(BasicType,Int)] -> Type -> [String] -> Type
+convertType _ (BT (Basic c)) 		_		= BT (Basic c)
+convertType basicT (Slash t1 t2)  list		| t2 == J   = let i = (length list) - (rightDegree basicT t1) - 1 in Slash (convertType basicT t1 list) (BT (Basic (list !! i)))
+											| otherwise	= Slash (convertType basicT t1 list) t2
+convertType basicT (BackSlash t1 t2) list	| t1 == J	= let i = leftDegree basicT t2 in BackSlash (BT (Basic (list !! i))) (convertType basicT t2 list)
+											| otherwise = BackSlash t1 (convertType basicT t2 list)
+convertType _ (Bullet t1 t2)		_		= Bullet t1 t2
+convertType basicT (DownArrow n t1 t2) list	= case t1 of
+											(BT (Basic c))  -> DownArrow 1 (UpArrow 1 (BT (Basic c)) (BT (Basic ("X_" ++ show n ++ "^" ++ c)))) (convertType basicT t2 list)
+											otherwise 		-> DownArrow n t1 (convertType basicT t2 list) -- ain't gonna happen
+convertType basicT (UpArrow n t1 t2) list	= UpArrow n (convertType basicT t1 list) t2
+convertType basicT (ODot n t1 t2)	 list	= let (BT (Basic c)) = headT t1 in ODot 1 (UpArrow 1 (convertType basicT t1 list) (BT (Basic ("X_" ++ show n ++ "^" ++ c)))) t2
+convertType _ I					_			= I
+convertType _ J					_ 			= J
+
+-- converting a grammar:
+-- New basic types are original basic types plus separator variable types,
+-- New dictionary is obtained by mapping the conversion over each lexical entry and adding separator variable entries
+-- New start type is the converted old one (If S is atomic this is not necessary)
+convertGrammar :: Grammar -> Grammar
+convertGrammar (basic,lex,start) = let sep = separatorVariables basic
+									in (basic ++ sep,
+										nub $ (concatMap (\x -> convertByLex ((basic,lex,start),x)) lex) ++ (separatorLexEntries sep),
+										convertType basic start []) -- or just start if S is atomic
+
+-- creating separator variables, n for each basictype of sort n
+separatorVariables :: [(BasicType,Int)] -> [(BasicType,Int)]
+separatorVariables [] = []
+separatorVariables ((Basic c,sort):xs) | sort > 0 	= (map (\x -> (Basic ("X_" ++ show x ++ "^" ++ c),0)) [1..sort]) ++ separatorVariables xs
+									   | otherwise 	= separatorVariables xs 
+
+-- creating separator variable lexical entries, one for each separator variable basic type
+separatorLexEntries :: [(BasicType,Int)] -> [LexEntry]
+separatorLexEntries [] = []
+separatorLexEntries ((Basic c,_):xs) = (map toLower c,BT (Basic c)):separatorLexEntries xs								   
+
+-- for one entry in the grammar, create a list of new lexical entries
+convertByLex :: (Grammar,LexEntry) -> [LexEntry]
+convertByLex (grammar,entry) = let vars = makeVars grammar entry
+									in fixByFth convertByLex' (grammar,[(entry,vars)],[(entry,vars)],[(fst entry,convertType (fst3 grammar) (snd entry) vars)])
+
+convertByLex' :: (Grammar,[(LexEntry,[String])],[(LexEntry,[String])],[LexEntry]) -> (Grammar,[(LexEntry,[String])],[(LexEntry,[String])],[LexEntry])
+convertByLex' (grammar,[],checked,outputEntries) = (grammar,[],checked,outputEntries)
+convertByLex' (grammar,((x,vars):xs),checked,outputEntries) = let tail1WithList = filter (\x -> not $ elem x checked) (traverseTail1 grammar (x,vars))
+                                                                  newOutputEntries = map (\((w,t),v) -> (w,convertType (fst3 grammar) t v)) tail1WithList
+														      in convertByLex' (grammar,xs ++ tail1WithList,(x,vars):checked,nub $ outputEntries ++ newOutputEntries)
+
+-- find the level 1 tail of a lexical entry and give it new variable lists
+traverseTail1 :: Grammar -> (LexEntry,[String]) -> [(LexEntry,[String])]
+traverseTail1 (basicT,dict,start) (entry,list) = let inputs = nub $ getInputTypes basicT (snd entry) list
+                                                     inputLex = [(w,t) | (w,t) <- dict, elem (headT t) (fst $ unzip inputs)]
+                                                     newLexs = map (\x -> (x,transform2 x inputs)) inputLex													 
+                                                    in concatMap flatten2 newLexs
+													
+flatten2 :: (LexEntry,[[String]]) -> [(LexEntry,[String])]
+flatten2 (entry,list) = map (\x -> (entry,x)) list													
+
+transform2 :: LexEntry -> [(Type,[String])] -> [[String]]
+transform2 entry inputs = let hd = headT (snd entry)
+                              in lookupAll hd inputs
+					
+getInputTypes :: [(BasicType,Int)] -> Type -> [String] -> [(Type,[String])]
+getInputTypes _ (BT (Basic c)) _ 							= []
+getInputTypes basicT (Slash t1 (BT (Basic c))) list			= caseS basicT list (BT (Basic c)) t1:getInputTypes basicT t1 list
+getInputTypes basicT (Slash t1 J) list						= getInputTypes basicT t1 list
+getInputTypes basicT (BackSlash (BT (Basic c)) t2) list		= caseBS basicT list (BT (Basic c)) t2:getInputTypes basicT t2 list
+getInputTypes basicT (BackSlash J t2) list					= getInputTypes basicT t2 list
+getInputTypes basicT (DownArrow n (BT (Basic c)) t2) list	= caseDA basicT list n (BT (Basic c)) t2:getInputTypes basicT t2 list
+getInputTypes _ _ _											= []
+
+caseS :: [(BasicType,Int)] -> [String] -> Type -> Type -> (Type,[String])
+caseS basicT list arg func = let i = (length list) - (rightDegree basicT func)
+                                 j = i + (sortTUnsafe basicT arg) - 1
+								 in (arg,extract (i,j) list)
+
+caseBS :: [(BasicType,Int)] -> [String] -> Type -> Type -> (Type,[String])
+caseBS basicT list arg func = let i = leftDegree basicT func + 1
+                                  j = i + (sortTUnsafe basicT arg) - 1
+								 in (arg,extract (i,j) list)
+
+caseDA :: [(BasicType,Int)] -> [String] -> Int -> Type -> Type -> (Type,[String])
+caseDA basicT list n arg func = if (sortTUnsafe basicT arg) > (sortTUnsafe basicT func)
+								 then (arg,insertAt (n-1) (makeVar arg n) list)
+								 else (arg,replaceName (extract (1,sortTUnsafe basicT arg) list) (n-1) arg)
+								 
+insertAt :: Int -> a -> [a] -> [a]
+insertAt _ _ [] = []
+insertAt n a (x:xs) | n > 0  = x:insertAt (n-1) a xs
+					| n == 0 = a:x:xs
+								 
+makeVar :: Type -> Int -> String
+makeVar (BT (Basic c)) n = "X_" ++ show n ++ "^" ++ c
+makeVar _ _ = ""
+
+replaceName :: [String] -> Int -> Type -> [String]
+replaceName [] _ _ = []
+replaceName (x:xs) n (BT (Basic c)) | n > 0  = x:(replaceName xs (n-1) (BT (Basic c)))
+                                    | n == 0 = (replaceUpperIndex x c):xs
+
+replaceUpperIndex :: String -> String -> String
+replaceUpperIndex inputString item = let firstpart = takeWhile (/='^') inputString
+										in firstpart ++ "^" ++ item	
+	
+makeVars :: Grammar -> LexEntry -> [String]
+makeVars (basicTypes,_,_) (w,t) = let (BT (Basic c)) = headT t
+                                      Just sort = lookup (Basic c) basicTypes
+									  in map (\x -> "X_" ++ show x ++ "^" ++ c) [1..sort]
+
+									  
+									  
+-- AUXILIARY FUNCTIONS
+
+-- version of lookup that returns ALL elements associated with the given key
+lookupAll :: Eq a => a -> [(a,b)] -> [b]
+lookupAll _ [] = []
+lookupAll x ((a,b):xs) | x == a    = b:lookupAll x xs
+					   | otherwise = lookupAll x xs
+
+fixByThd :: Eq c => ((a,b,c) -> (a,b,c)) -> (a,b,c) -> c
+fixByThd f x | thd (f x) == thd x 		= thd x
+			 | otherwise 	= fixByThd f (f x)
+
+fixByFth :: Eq d => ((a,b,c,d) -> (a,b,c,d)) -> (a,b,c,d) -> d
+fixByFth f x | fth (f x) == fth x 		= fth x
+			 | otherwise 	= fixByFth f (f x)
+			 
+fst3 :: (a,b,c) -> a
+fst3 (a,_,_) = a
+			
+snd3 :: (a,b,c) -> b
+snd3 (_,b,_) = b
+			
+thd :: (a,b,c) -> c
+thd (_,_,c) = c
+
+fth :: (a,b,c,d) -> d
+fth (_,_,_,d) = d
+
+extract :: (Int,Int) -> [a] -> [a]
+extract (l,r) list = take (r-l+1) $ drop (l-1) list
+
+-- WRITING A GRAMMAR TO LATEX FILE
+convertAndToLatex :: Grammar -> IO ProcessHandle
+convertAndToLatex grammar = do
+							outh <- openFile "output\\output.tex" WriteMode
+							hPutStr outh (writeGCG2L grammar)
+							hClose outh
+							runCommand "pdflatex -output-directory=output output\\output.tex"
+							
+writeGCG2L :: Grammar -> String
+writeGCG2L (basic,dict,start) = let (newBasic,newDict,newStart) = convertGrammar (basic,dict,start)
+						in "\\documentclass{report}\n\n\\begin{document}\n\nStart symbol: $" ++ 
+						type2Latex start ++ 
+						"$\\\\\n\n\\noindent" ++ 
+						dict2Latex dict ++ 
+						"\n\n\n\nStart symbol: $" ++
+						type2Latex newStart ++
+						"$\\\\\n\n\\noindent" ++
+						dict2Latex newDict ++
+						"\n\\end{document}"							
+							
+grammarToLatex :: Grammar -> IO ProcessHandle
+grammarToLatex grammar = do
+						 outh <- openFile "output\\output.tex" WriteMode
+						 hPutStr outh (writeG2L grammar)
+						 hClose outh
+						 runCommand "pdflatex -output-directory=output output\\output.tex"
+						 
+writeG2L :: Grammar -> String
+writeG2L (basic,dict,start) = "\\documentclass{report}\n\n\\begin{document}\n\nStart symbol: $" ++ 
+						(type2Latex start) ++ 
+						"$\\\\\n\n\\noindent" ++ 
+						dict2Latex dict ++ 
+						"\n\\end{document}"
+
+type2Latex :: Type -> String
+type2Latex (BT (Basic c)) = c
+type2Latex (Slash t1 t2) 			= "(" ++ type2Latex t1 ++ " \\slash " ++ type2Latex t2 ++ ")"
+type2Latex (BackSlash t1 t2) 		= "(" ++ type2Latex t1 ++ " \\backslash " ++ type2Latex t2 ++ ")"
+type2Latex (Bullet t1 t2) 			= "(" ++ type2Latex t1 ++ " \\bullet " ++ type2Latex t2 ++ ")"
+type2Latex (DownArrow n t1 t2) 		= "(" ++ type2Latex t1 ++ " \\downarrow_" ++ show n ++ " " ++ type2Latex t2 ++ ")"
+type2Latex (UpArrow n t1 t2) 		= "(" ++ type2Latex t1 ++ " \\uparrow_" ++ show n ++ " " ++ type2Latex t2 ++ ")"
+type2Latex (ODot n t1 t2)			= "(" ++ type2Latex t1 ++ " \\odot_" ++ show n ++ " " ++ type2Latex t2 ++ ")"
+type2Latex I						= "I"
+type2Latex J						= "J"
+
+dict2Latex :: [LexEntry] -> String
+dict2Latex [] = ""
+dict2Latex ((x,y):xs) = "$" ++ x ++ " : " ++ type2Latex y ++ "$\\\\\n" ++ dict2Latex xs
